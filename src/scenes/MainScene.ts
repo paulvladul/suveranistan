@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { type BossQuizQuestion, parseBossQuiz } from '../bossQuiz';
 import { GIFT_LABELS, GiftKind, SFX, TEX } from './PreloadScene';
 
 const CHICKEN_HP = 2;
@@ -22,11 +23,24 @@ const SECTOR_END_AFTER_BOSS_MS = 7000;
 const BASE_MOVE_SPEED = 320;
 const START_BULLET_COUNT = 1;
 const MAX_BULLET_COUNT = 8;
+const SCORE_BULLET_CANCEL = 5;
+const SCORE_KILL_ENEMY_L1 = 15;
+const SCORE_KILL_ENEMY_L2 = 30;
+const SCORE_KILL_BOSS = 100;
+const PLAYER_SALVO_ROW_CAPS = [5, 3, 1] as const;
+const PLAYER_SALVO_SPACING_X = 15;
+const PLAYER_SALVO_ROW_GAP_Y = 16;
+const PLAYER_SALVO_ORIGIN_Y_OFFSET = 28;
 const INVULN_MS = 2200;
+const PLAYER_HIT_SCORE_PENALTY = 200;
+const PLAYER_HIT_WEAPON_PENALTY = 3;
+const PLAYER_DEATH_FADE_MS = 220;
+const PLAYER_DEATH_BURST_MS = 380;
+const PLAYER_SPAWN_ENTER_MS = 520;
 const GIFT_DRIFT_SPEED = 52;
-const GIFT_SPAWN_MIN_INTERVAL = 9000;
-const GIFT_SPAWN_MAX_INTERVAL = 18000;
-const CLEAR_RADIUS = 52;
+/** Șansă la moartea unui inamic din flotă ca să apară un cadou la poziția lui. */
+const GIFT_DROP_CHANCE_FLEET = 0.14;
+const GIFT_DROP_CHANCE_BOSS = 0.42;
 /** Rază explozie jet apă; sortare după distanță, max. victime. */
 const WATER_SPLASH_RADIUS = 260;
 const WATER_SPLASH_MAX_KILLS = 8;
@@ -38,12 +52,16 @@ const SHIP_DISPLAY_HEIGHT = 82;
 /** Chenar maxim pentru banană PNG; scalare uniformă, fără deformare. */
 const ENEMY_BULLET_MAX_DISPLAY_W = 72;
 const ENEMY_BULLET_MAX_DISPLAY_H = 34;
-/** Inamic „tare”: 3 HP, trage proiectile blugi; tot pui vizual, din sectorul 2. */
+/** Același ordin de mărime ca puiul procedural (~48px) — `enemy1.png` scalat uniform în chenar. */
+const ENEMY1_FLEET_MAX_DISPLAY_W = 52;
+const ENEMY1_FLEET_MAX_DISPLAY_H = 52;
+const ENEMY2_FLEET_MAX_DISPLAY_W = 54;
+const ENEMY2_FLEET_MAX_DISPLAY_H = 54;
+/** Inamic „tare”: 3 HP, trage proiectile blugi; `enemy2.png` sau pui + tentă dacă lipsește PNG. */
 const TOUGH_ENEMY_HP = 3;
 const TOUGH_ENEMY_FIRST_SECTOR = 2;
 const TOUGH_ENEMY_SPAWN_CHANCE = 0.38;
 const TOUGH_ENEMY_SCALE = 1.12;
-/** Tentă rece / „platoșă”; rămâne același sprite ca puii obișnuiți. */
 const TOUGH_ENEMY_TINT = 0xa8b8d0;
 /** Când centrul proiectilului blugi ajunge aproape de baza canvasului, explodează. */
 const JEANS_EXPLODE_BOTTOM_MARGIN = 78;
@@ -56,6 +74,15 @@ const NICUSOR_BOSS_MAX_DISPLAY_H = 260;
 const PLAYER_SPAWN_OFFSET_FROM_BOTTOM = 56;
 /** După Reia din pauză: nava rămâne înghețată până miști mouse-ul cu atâția px față de poziția la resume. */
 const POST_PAUSE_POINTER_DEADZONE_PX = 100;
+/** Min. ms între două redări maingun: o salvă cu multe gloanțe = un singur „burst”, nu 8 sample-uri odată. */
+const MAIN_GUN_MIN_INTERVAL_MS = 52;
+const QUIZ_RESULT_HOLD_MS = 620;
+const QUIZ_TRANSITION_FADE_MS = 520;
+const WAVE_INTRO_DROP_Y = 168;
+const WAVE_INTRO_STAGGER_MS = 34;
+const WAVE_INTRO_TWEEN_MS = 460;
+const BOSS_INTRO_STAGGER_MS = 0;
+const BOSS_INTRO_TWEEN_MS = 720;
 export class MainScene extends Phaser.Scene {
   private player!: Phaser.Types.Physics.Arcade.ImageWithDynamicBody;
 
@@ -64,14 +91,12 @@ export class MainScene extends Phaser.Scene {
   private enemies!: Phaser.Physics.Arcade.Group;
   private gifts!: Phaser.Physics.Arcade.Group;
 
-  private moveSpeed = BASE_MOVE_SPEED;
   private fleetSpeed = 55;
   private fleetDir = 1;
   private nextFire = 0;
   private fireDelay = 220;
   private enemyProjectileSpeed = 135;
   private nextEnemyShotAt = 1800;
-  private nextGiftAt = 5000;
   private matchEnded = false;
 
   /** Val curent: 1–5 flotă, 6 = boss. După boss → sector++ și revine la 1. */
@@ -84,6 +109,8 @@ export class MainScene extends Phaser.Scene {
   private enemyShotMinMs = 700;
   private enemyShotMaxMs = 1700;
   private waveBreakInProgress = false;
+  /** Până la finalul animației de intrare în val, inamicii nu trag / flota nu se mișcă / nu primesc lovești din coliziuni. */
+  private waveIntroActive = false;
 
   private lives = STARTING_LIVES;
   private bulletCount = START_BULLET_COUNT;
@@ -96,8 +123,9 @@ export class MainScene extends Phaser.Scene {
   private prevLeftButtonDown = false;
 
   private hud!: Phaser.GameObjects.Text;
+  private hudSubtitle = '';
   private statsText!: Phaser.GameObjects.Text;
-  private hintText!: Phaser.GameObjects.Text;
+  private score = 0;
   private startMenuLayer!: Phaser.GameObjects.Container;
   private pauseMenuLayer!: Phaser.GameObjects.Container;
   private gameOverLayer!: Phaser.GameObjects.Container;
@@ -108,8 +136,13 @@ export class MainScene extends Phaser.Scene {
   /** Overlay „Runda / Boss” între valuri; distrus după animație. */
   private roundAnnouncementLayer?: Phaser.GameObjects.Container;
   private bossApproachLayer?: Phaser.GameObjects.Container;
+  private quizLayer?: Phaser.GameObjects.Container;
+  private quizQuestions: BossQuizQuestion[] = [];
   private bossApproachSound?: Phaser.Sound.BaseSound;
   private sectorEndAfterBossSound?: Phaser.Sound.BaseSound;
+  /** Evită dublu-sunet la trecerea rapidă între hitbox-ul butonului și etichetă. */
+  private lastBtnHoverSoundAt = 0;
+  private lastMainGunSoundTime = 0;
   /** După apăsarea Start — altfel jocul e înghețat. */
   private gameplayActive = false;
   /** Meniu ESC: joc înghețat, „Reia jocul” pe canvas. */
@@ -119,6 +152,7 @@ export class MainScene extends Phaser.Scene {
    * În rest, nava urmărește 1:1 cursorul cât timp e în canvas.
    */
   private shipAwaitingAlignClickAfterRound = false;
+  private playerDeathAnimActive = false;
   /** >0: după pauză, nava înghețată până depărtezi mouse-ul de punctul de referință. */
   private postPausePointerDeadzonePx = 0;
   private postPausePointerRefX = 0;
@@ -165,6 +199,8 @@ export class MainScene extends Phaser.Scene {
     this.bossApproachSound = undefined;
     this.bossApproachLayer?.destroy(true);
     this.bossApproachLayer = undefined;
+    this.quizLayer?.destroy(true);
+    this.quizLayer = undefined;
     this.roundAnnouncementLayer?.destroy(true);
     this.roundAnnouncementLayer = undefined;
     this.physics.world.off('worldbounds', this.handleWorldBounds, this);
@@ -174,8 +210,12 @@ export class MainScene extends Phaser.Scene {
   }
 
   create(): void {
+    const quizRaw = this.cache.json.get('boss_quiz');
+    this.quizQuestions = parseBossQuiz(quizRaw);
+
     this.matchEnded = false;
     this.gameplayActive = false;
+    this.waveIntroActive = false;
     this.escMenuOpen = false;
     this.waterCharges = 0;
     this.prevRightButtonDown = false;
@@ -184,12 +224,12 @@ export class MainScene extends Phaser.Scene {
     this.nextFire = 0;
     const t0 = this.time.now;
     this.nextEnemyShotAt = t0 + 1800;
-    this.nextGiftAt = t0 + 5000;
 
     this.lives = STARTING_LIVES;
     this.bulletCount = START_BULLET_COUNT;
-    this.moveSpeed = BASE_MOVE_SPEED;
     this.invulnerableUntil = 0;
+    this.score = 0;
+    this.hudSubtitle = '';
 
     this.hud = this.add
       .text(this.scale.width / 2, 28, '', {
@@ -207,17 +247,8 @@ export class MainScene extends Phaser.Scene {
       })
       .setOrigin(0, 0);
 
-    this.hintText = this.add
-      .text(this.scale.width / 2, this.scale.height - 20, '', {
-        fontFamily: 'system-ui, Segoe UI, sans-serif',
-        fontSize: '13px',
-        color: '#9ddcff',
-      })
-      .setOrigin(0.5, 1);
-
     this.updateStatsDisplay();
     this.statsText.setVisible(false);
-    this.hintText.setVisible(false);
 
     this.createStarfield();
 
@@ -275,7 +306,7 @@ export class MainScene extends Phaser.Scene {
     );
 
     this.physics.add.overlap(this.player, this.enemies, (_p, en) => {
-      if (!this.gameplayActive || this.escMenuOpen) return;
+      if (!this.gameplayActive || this.escMenuOpen || this.waveIntroActive) return;
       if (this.time.now < this.invulnerableUntil) return;
       const enemy = en as Phaser.Physics.Arcade.Image;
       if (!enemy.active) return;
@@ -316,6 +347,9 @@ export class MainScene extends Phaser.Scene {
       this.enemyBullets.killAndHide(enemyB);
       (playerB.body as Phaser.Physics.Arcade.Body).setVelocity(0, 0);
       (enemyB.body as Phaser.Physics.Arcade.Body).setVelocity(0, 0);
+      if (this.gameplayActive && !this.escMenuOpen && !this.matchEnded) {
+        this.addScore(SCORE_BULLET_CANCEL);
+      }
     });
 
     this.physics.world.off('worldbounds', this.handleWorldBounds, this);
@@ -325,8 +359,15 @@ export class MainScene extends Phaser.Scene {
     this.createPauseMenuLayer();
     this.createGameOverLayer();
 
-    this.updateGameplayHint();
     this.physics.pause();
+  }
+
+  private playButtonHoverSound(): void {
+    if (!this.cache.audio.exists(SFX.BTN_HOVER)) return;
+    const now = this.time.now;
+    if (now - this.lastBtnHoverSoundAt < 100) return;
+    this.lastBtnHoverSoundAt = now;
+    this.sound.play(SFX.BTN_HOVER, { volume: 0.72 });
   }
 
   private createStartMenuLayer(): void {
@@ -358,10 +399,14 @@ export class MainScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
     const doStart = (): void => this.onPressStart();
-    btn.on('pointerover', () => btn.setFillStyle(0x2a5f8f));
+    btn.on('pointerover', () => {
+      this.playButtonHoverSound();
+      btn.setFillStyle(0x2a5f8f);
+    });
     btn.on('pointerout', () => btn.setFillStyle(0x1e4a6e));
     btn.on('pointerdown', doStart);
     btnLabel.setInteractive({ useHandCursor: true });
+    btnLabel.on('pointerover', () => this.playButtonHoverSound());
     btnLabel.on('pointerdown', doStart);
 
     const tip = this.add
@@ -406,10 +451,14 @@ export class MainScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
     const doResume = (): void => this.closePauseMenu();
-    btn.on('pointerover', () => btn.setFillStyle(0x2a7a62));
+    btn.on('pointerover', () => {
+      this.playButtonHoverSound();
+      btn.setFillStyle(0x2a7a62);
+    });
     btn.on('pointerout', () => btn.setFillStyle(0x1e5a4a));
     btn.on('pointerdown', doResume);
     btnLabel.setInteractive({ useHandCursor: true });
+    btnLabel.on('pointerover', () => this.playButtonHoverSound());
     btnLabel.on('pointerdown', doResume);
 
     layer.add([dim, title, btn, btnLabel]);
@@ -449,10 +498,14 @@ export class MainScene extends Phaser.Scene {
     const doRestart = (): void => {
       this.scene.restart();
     };
-    btn.on('pointerover', () => btn.setFillStyle(0x2a5f8f));
+    btn.on('pointerover', () => {
+      this.playButtonHoverSound();
+      btn.setFillStyle(0x2a5f8f);
+    });
     btn.on('pointerout', () => btn.setFillStyle(0x1e4a6e));
     btn.on('pointerdown', doRestart);
     btnLabel.setInteractive({ useHandCursor: true });
+    btnLabel.on('pointerover', () => this.playButtonHoverSound());
     btnLabel.on('pointerdown', doRestart);
 
     layer.add([dim, title, btn, btnLabel]);
@@ -509,16 +562,12 @@ export class MainScene extends Phaser.Scene {
     this.bossBarBg.setVisible(false);
     this.bossBarFill.setVisible(false);
     this.bossBarText.setVisible(false);
-    if (this.hintText && this.gameplayActive && !this.matchEnded) {
-      this.hintText.setY(this.scale.height - 20);
-    }
   }
 
   private showBossHealthBar(maxHp: number, currentHp: number): void {
     this.bossBarBg.setVisible(true);
     this.bossBarFill.setVisible(true);
     this.bossBarText.setVisible(true);
-    if (this.hintText) this.hintText.setY(this.scale.height - 46);
     this.updateBossHealthBarUI(currentHp, maxHp);
   }
 
@@ -541,15 +590,11 @@ export class MainScene extends Phaser.Scene {
     if (this.gameplayActive || this.matchEnded) return;
     this.gameplayActive = true;
     this.statsText.setVisible(true);
-    this.hintText.setVisible(true);
-    const t0 = this.time.now;
-    this.nextEnemyShotAt = t0 + 1800;
-    this.nextGiftAt = t0 + 5000;
     this.physics.resume();
     this.startMenuLayer.setVisible(false);
     this.resetPlayerShipToSpawnAndReanchorPointer();
     this.refreshWaveBanner();
-    this.updateGameplayHint();
+    this.playRoundAnnouncementThen(() => this.beginWaveSpawnIntro());
   }
 
   private openPauseMenu(): void {
@@ -559,7 +604,6 @@ export class MainScene extends Phaser.Scene {
     this.pauseMenuLayer.setVisible(true);
     this.physics.pause();
     this.hideBossHealthBar();
-    this.updateGameplayHint();
   }
 
   private closePauseMenu(): void {
@@ -580,7 +624,6 @@ export class MainScene extends Phaser.Scene {
         }
       }
     }
-    this.updateGameplayHint();
   }
 
   /** După Reia: nava stă pe loc până muți mouse-ul (nu sare la poziția butonului). */
@@ -613,24 +656,6 @@ export class MainScene extends Phaser.Scene {
     this.shipControlPointerAnchorY = p.y;
   }
 
-  private updateGameplayHint(): void {
-    if (this.matchEnded) {
-      this.hintText.setText('');
-      return;
-    }
-    if (!this.gameplayActive) {
-      this.hintText.setText('');
-      return;
-    }
-    if (this.escMenuOpen) {
-      this.hintText.setText('');
-      return;
-    }
-    this.hintText.setText(
-      'Nava urmează cursorul în zona de joc · După rundă nouă: click stânga ca să aliniezi · Stânga: foc · Dreapta: jet apă · ESC: pauză',
-    );
-  }
-
   private handleWorldBounds(body: Phaser.Physics.Arcade.Body): void {
     const go = body.gameObject;
     if (this.gifts.contains(go as Phaser.GameObjects.GameObject)) {
@@ -652,11 +677,37 @@ export class MainScene extends Phaser.Scene {
   private updateStatsDisplay(): void {
     const parts = [
       `Vieți: ${this.lives}`,
-      `Viteză: ${Math.round(this.moveSpeed)}`,
       `Nivel Armă: ${this.bulletCount}`,
       `Jet apă: ${this.waterCharges}`,
     ];
     this.statsText.setText(parts.join('  ·  '));
+  }
+
+  private applyHudText(): void {
+    if (this.matchEnded) {
+      this.hud.setText(this.score > 0 ? `Scor: ${this.score}` : '');
+      return;
+    }
+    const sub = this.hudSubtitle;
+    this.hud.setText(sub === '' ? `Scor: ${this.score}` : `Scor: ${this.score}  ·  ${sub}`);
+  }
+
+  private addScore(delta: number): void {
+    if (this.matchEnded || delta <= 0) return;
+    this.score += delta;
+    this.applyHudText();
+  }
+
+  private scoreEnemyKill(enemy: Phaser.Physics.Arcade.Image): void {
+    if (this.matchEnded) return;
+    const isBoss = Boolean(enemy.getData('isBoss'));
+    if (isBoss) {
+      this.addScore(SCORE_KILL_BOSS);
+    } else if (enemy.getData('shootsJeans')) {
+      this.addScore(SCORE_KILL_ENEMY_L2);
+    } else {
+      this.addScore(SCORE_KILL_ENEMY_L1);
+    }
   }
 
   private removeGift(gift: Phaser.GameObjects.Container): void {
@@ -728,11 +779,18 @@ export class MainScene extends Phaser.Scene {
   }
 
   /** Explozie scurtă la distrugerea unui inamic (pui / boss). */
-  private playEnemyDestroyedVfx(x: number, y: number, enemyScale: number, isBoss: boolean): void {
+  private playEnemyDestroyedVfx(
+    x: number,
+    y: number,
+    enemyScale: number,
+    isBoss: boolean,
+    textureKey: string = TEX.CHICKEN,
+  ): void {
     const depth = 62;
     const dur = isBoss ? 400 : 240;
 
-    const puff = this.add.image(x, y, TEX.CHICKEN);
+    const puffKey = this.textures.exists(textureKey) ? textureKey : TEX.CHICKEN;
+    const puff = this.add.image(x, y, puffKey);
     puff.setDepth(depth);
     puff.setScale(enemyScale);
     puff.clearTint();
@@ -788,6 +846,66 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
+  private playPlayerShipExplosionVfx(x: number, y: number): void {
+    const depth = 90;
+    const dur = PLAYER_DEATH_BURST_MS;
+    const shipTex = this.textures.exists(TEX.SHIP) ? TEX.SHIP : undefined;
+    if (shipTex) {
+      const puff = this.add.image(x, y, shipTex);
+      puff.setDepth(depth);
+      puff.setDisplaySize(SHIP_DISPLAY_WIDTH, SHIP_DISPLAY_HEIGHT);
+      puff.setTint(0xffcc66);
+      puff.setAlpha(0.95);
+      this.tweens.add({
+        targets: puff,
+        scaleX: puff.scaleX * 1.65,
+        scaleY: puff.scaleY * 1.65,
+        alpha: 0,
+        angle: Phaser.Math.Between(-140, 140),
+        duration: dur,
+        ease: 'Cubic.easeOut',
+        onComplete: () => puff.destroy(),
+      });
+    }
+    const ring = this.add.circle(x, y, 20, 0x4ade80, 0.45);
+    ring.setDepth(depth - 1);
+    ring.setStrokeStyle(3, 0xe0ffe0, 0.9);
+    this.tweens.add({
+      targets: ring,
+      scaleX: 9,
+      scaleY: 9,
+      alpha: 0,
+      duration: dur + 120,
+      ease: 'Quad.easeOut',
+      onComplete: () => ring.destroy(),
+    });
+    const n = 14;
+    for (let i = 0; i < n; i++) {
+      const ang = (Math.PI * 2 * i) / n + Phaser.Math.FloatBetween(-0.12, 0.12);
+      const dist = Phaser.Math.Between(42, 110);
+      const colors = [0x4ade80, 0x38bdf8, 0xfbbf24, 0x93c5fd, 0xe0f2fe];
+      const c = this.add.circle(
+        x + Math.cos(ang) * 8,
+        y + Math.sin(ang) * 8,
+        Phaser.Math.Between(2, 6),
+        Phaser.Math.RND.pick(colors),
+        0.9,
+      );
+      c.setDepth(depth);
+      this.tweens.add({
+        targets: c,
+        x: x + Math.cos(ang) * dist,
+        y: y + Math.sin(ang) * dist,
+        alpha: 0,
+        scaleX: 0.2,
+        scaleY: 0.2,
+        duration: dur + Phaser.Math.Between(-50, 70),
+        ease: 'Cubic.easeOut',
+        onComplete: () => c.destroy(),
+      });
+    }
+  }
+
   private playWaterSplashVfx(x: number, y: number): void {
     const ring = this.add.circle(x, y, 22, 0x38bdf8, 0.45);
     ring.setDepth(54);
@@ -820,11 +938,14 @@ export class MainScene extends Phaser.Scene {
       .slice(0, WATER_SPLASH_MAX_KILLS);
 
     for (const { e } of inRadius) {
+      this.scoreEnemyKill(e);
+      this.maybeDropGiftAt(e.x, e.y, Boolean(e.getData('isBoss')));
       this.playEnemyDestroyedVfx(
         e.x,
         e.y,
         Math.max(0.65, e.displayWidth / 48),
         Boolean(e.getData('isBoss')),
+        e.texture.key,
       );
       this.enemies.remove(e, true, true);
     }
@@ -835,15 +956,80 @@ export class MainScene extends Phaser.Scene {
   }
 
   private playerHit(): void {
-    if (this.matchEnded) return;
+    if (this.matchEnded || this.playerDeathAnimActive) return;
+
     this.lives -= 1;
+    this.bulletCount = Math.max(START_BULLET_COUNT, this.bulletCount - PLAYER_HIT_WEAPON_PENALTY);
+    this.score = Math.max(0, this.score - PLAYER_HIT_SCORE_PENALTY);
     this.updateStatsDisplay();
-    if (this.lives <= 0) {
-      this.gameOver();
-      return;
-    }
-    this.invulnerableUntil = this.time.now + INVULN_MS;
-    this.flashPlayerInvulnerable();
+    this.applyHudText();
+
+    const fatal = this.lives <= 0;
+    this.playerDeathAnimActive = true;
+    this.playerBlink?.remove(false);
+
+    const sx = this.player.x;
+    const sy = this.player.y;
+    const w = this.scale.width;
+    const h = this.scale.height;
+    const halfW = this.player.displayWidth * 0.5;
+    const halfH = this.player.displayHeight * 0.5;
+    const spawnX = Phaser.Math.Clamp(w / 2, halfW, w - halfW);
+    const spawnY = Phaser.Math.Clamp(h - PLAYER_SPAWN_OFFSET_FROM_BOTTOM, halfH, h - halfH);
+    const enterY = h + halfH * 2 + 36;
+    const body = this.player.body as Phaser.Physics.Arcade.Body;
+
+    this.invulnerableUntil = this.time.now + 9_999_999;
+    this.playPlayerShipExplosionVfx(sx, sy);
+
+    const kx = this.player.scaleX;
+    const ky = this.player.scaleY;
+
+    this.tweens.add({
+      targets: this.player,
+      alpha: 0,
+      scaleX: kx * 1.25,
+      scaleY: ky * 1.25,
+      duration: PLAYER_DEATH_FADE_MS,
+      ease: 'Cubic.easeIn',
+      onComplete: () => {
+        if (fatal) {
+          this.player.setAlpha(0);
+          this.playerDeathAnimActive = false;
+          this.gameOver();
+          return;
+        }
+        this.player.clearTint();
+        this.player.setDisplaySize(SHIP_DISPLAY_WIDTH, SHIP_DISPLAY_HEIGHT);
+        this.player.setScale(1, 1);
+        this.player.setPosition(spawnX, enterY);
+        body.reset(spawnX, enterY);
+        this.player.setAlpha(0);
+        this.tweens.add({
+          targets: this.player,
+          y: spawnY,
+          alpha: 1,
+          duration: PLAYER_SPAWN_ENTER_MS,
+          ease: 'Cubic.easeOut',
+          onUpdate: () => {
+            body.reset(this.player.x, this.player.y);
+          },
+          onComplete: () => {
+            body.reset(spawnX, spawnY);
+            this.postPausePointerDeadzonePx = 0;
+            this.shipAwaitingAlignClickAfterRound = true;
+            this.shipControlBaseX = spawnX;
+            this.shipControlBaseY = spawnY;
+            const p = this.input.activePointer;
+            this.shipControlPointerAnchorX = p.x;
+            this.shipControlPointerAnchorY = p.y;
+            this.playerDeathAnimActive = false;
+            this.invulnerableUntil = this.time.now + INVULN_MS;
+            this.flashPlayerInvulnerable();
+          },
+        });
+      },
+    });
   }
 
   private flashPlayerInvulnerable(): void {
@@ -875,54 +1061,16 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
-  private getEnemyFleetBottom(): number {
-    let maxY = 0;
-    for (const e of this.enemies.getChildren()) {
-      const im = e as Phaser.Physics.Arcade.Image;
-      if (im.active) maxY = Math.max(maxY, im.y);
-    }
-    return maxY;
-  }
-
-  private isClearOfEnemies(x: number, y: number): boolean {
-    for (const e of this.enemies.getChildren()) {
-      const im = e as Phaser.Physics.Arcade.Image;
-      if (!im.active) continue;
-      if (Phaser.Math.Distance.Between(x, y, im.x, im.y) < CLEAR_RADIUS) return false;
-    }
-    return true;
-  }
-
-  private trySpawnGift(time: number): void {
+  private maybeDropGiftAt(x: number, y: number, isBoss: boolean): void {
     if (this.matchEnded || !this.gameplayActive || this.escMenuOpen) return;
-    if (time < this.nextGiftAt) return;
-
-    const w = this.scale.width;
-    const h = this.scale.height;
-    const margin = 40;
-    const fleetBottom = this.getEnemyFleetBottom();
-    const minY = Math.min(fleetBottom + 55, h * 0.72);
-    const maxY = h - 90;
-    if (minY >= maxY) {
-      this.nextGiftAt = time + 3000;
-      return;
-    }
+    const p = isBoss ? GIFT_DROP_CHANCE_BOSS : GIFT_DROP_CHANCE_FLEET;
+    if (Phaser.Math.FloatBetween(0, 1) >= p) return;
 
     const kind: GiftKind = this.forceWaterFirstGiftForTest ? 'water' : this.pickRandomGiftKind();
-
-    for (let attempt = 0; attempt < 18; attempt++) {
-      const x = Phaser.Math.Between(margin, w - margin);
-      const y = Phaser.Math.Between(minY, maxY);
-      if (!this.isClearOfEnemies(x, y)) continue;
-
-      this.spawnTextGift(x, y, kind);
-      if (this.forceWaterFirstGiftForTest) {
-        this.forceWaterFirstGiftForTest = false;
-      }
-      break;
+    this.spawnTextGift(x, y - 10, kind);
+    if (this.forceWaterFirstGiftForTest) {
+      this.forceWaterFirstGiftForTest = false;
     }
-
-    this.nextGiftAt = time + Phaser.Math.Between(GIFT_SPAWN_MIN_INTERVAL, GIFT_SPAWN_MAX_INTERVAL);
   }
 
   /** Cadou doar cu text; poți înlocui mai târziu cu imagini în același container. */
@@ -963,6 +1111,7 @@ export class MainScene extends Phaser.Scene {
     const originY = 88;
     const gapY = rows > 4 ? 50 : 56;
 
+    let spawnOrder = 0;
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const x = originX + c * gapX;
@@ -971,8 +1120,19 @@ export class MainScene extends Phaser.Scene {
           this.stageNumber >= TOUGH_ENEMY_FIRST_SECTOR &&
           Phaser.Math.FloatBetween(0, 1) < TOUGH_ENEMY_SPAWN_CHANCE;
         const hp = rollTough ? TOUGH_ENEMY_HP : this.waveChickenHp;
-        const e = this.physics.add.image(x, y, TEX.CHICKEN);
-        if (rollTough) {
+        const useEnemy2 = rollTough && this.textures.exists(TEX.ENEMY2);
+        const useEnemy1 = !rollTough && this.textures.exists(TEX.ENEMY1);
+        const tex = useEnemy2 ? TEX.ENEMY2 : useEnemy1 ? TEX.ENEMY1 : TEX.CHICKEN;
+        const e = this.physics.add.image(x, y, tex);
+        if (useEnemy1) {
+          this.applyTextureFitBox(e, ENEMY1_FLEET_MAX_DISPLAY_W, ENEMY1_FLEET_MAX_DISPLAY_H, true);
+        }
+        if (useEnemy2) {
+          this.applyTextureFitBox(e, ENEMY2_FLEET_MAX_DISPLAY_W, ENEMY2_FLEET_MAX_DISPLAY_H, true);
+          e.setScale(e.scaleX * TOUGH_ENEMY_SCALE, e.scaleY * TOUGH_ENEMY_SCALE);
+          e.clearTint();
+          e.setData('shootsJeans', true);
+        } else if (rollTough) {
           e.setScale(TOUGH_ENEMY_SCALE);
           e.setTint(TOUGH_ENEMY_TINT);
           e.setData('shootsJeans', true);
@@ -982,9 +1142,20 @@ export class MainScene extends Phaser.Scene {
         }
         e.setData('hp', hp);
         e.setData('isBoss', false);
+        const fsx = e.scaleX;
+        const fsy = e.scaleY;
+        e.setData('introTx', x);
+        e.setData('introTy', y);
+        e.setData('introSx', fsx);
+        e.setData('introSy', fsy);
+        e.setData('introOrder', spawnOrder++);
+        e.setPosition(x, y - WAVE_INTRO_DROP_Y);
+        e.setAlpha(0);
+        e.setScale(fsx * 0.2, fsy * 0.2);
         const b = e.body as Phaser.Physics.Arcade.Body;
         b.setImmovable(true);
         b.setAllowGravity(false);
+        b.reset(x, y - WAVE_INTRO_DROP_Y);
         e.refreshBody();
         this.enemies.add(e);
       }
@@ -992,7 +1163,7 @@ export class MainScene extends Phaser.Scene {
   }
 
   private onBulletHitEnemy(bullet: Phaser.Physics.Arcade.Image, enemy: Phaser.Physics.Arcade.Image): void {
-    if (!this.gameplayActive || this.escMenuOpen) return;
+    if (!this.gameplayActive || this.escMenuOpen || this.waveIntroActive) return;
     if (!bullet.active || !enemy.active) return;
 
     this.bullets.killAndHide(bullet);
@@ -1009,11 +1180,14 @@ export class MainScene extends Phaser.Scene {
     }
 
     if (hp <= 0) {
+      this.scoreEnemyKill(enemy);
+      this.maybeDropGiftAt(enemy.x, enemy.y, Boolean(isBoss));
       this.playEnemyDestroyedVfx(
         enemy.x,
         enemy.y,
         Math.max(0.65, enemy.displayWidth / 48),
         Boolean(isBoss),
+        enemy.texture.key,
       );
       this.enemies.remove(enemy, true, true);
     } else {
@@ -1057,15 +1231,15 @@ export class MainScene extends Phaser.Scene {
   private refreshWaveBanner(): void {
     if (!this.gameplayActive || this.matchEnded) return;
     if (this.waveNumber === BOSS_WAVE_NUMBER) {
-      this.hud.setText(`BOSS · sector ${this.stageNumber}`);
+      this.hudSubtitle = `BOSS · sector ${this.stageNumber}`;
     } else {
-      this.hud.setText(`Val ${this.waveNumber}/${NORMAL_WAVE_COUNT} · sector ${this.stageNumber}`);
+      this.hudSubtitle = `Val ${this.waveNumber}/${NORMAL_WAVE_COUNT} · sector ${this.stageNumber}`;
     }
+    this.applyHudText();
   }
 
   private armWaveTimers(t: number): void {
     this.nextEnemyShotAt = t + Phaser.Math.Between(500, 1100);
-    this.nextGiftAt = t + Phaser.Math.Between(3500, 6500);
   }
 
   private onAllWaveEnemiesDefeated(): void {
@@ -1077,15 +1251,16 @@ export class MainScene extends Phaser.Scene {
     if (beatBoss) {
       this.stageNumber += 1;
       this.waveNumber = 1;
-      this.hud.setText(`Boss învins! Sector ${this.stageNumber}`);
+      this.hudSubtitle = `Boss învins! Sector ${this.stageNumber}`;
     } else {
       this.waveNumber += 1;
       if (this.waveNumber === BOSS_WAVE_NUMBER) {
-        this.hud.setText('Vine BOSS-ul!');
+        this.hudSubtitle = 'Vine BOSS-ul!';
       } else {
-        this.hud.setText(`Val ${this.waveNumber}/${NORMAL_WAVE_COUNT}…`);
+        this.hudSubtitle = `Val ${this.waveNumber}/${NORMAL_WAVE_COUNT}…`;
       }
     }
+    this.applyHudText();
 
     this.clearWaveBattleEntities();
     this.applyWaveDifficulty();
@@ -1096,14 +1271,14 @@ export class MainScene extends Phaser.Scene {
       this.waveBreakInProgress = false;
       if (this.matchEnded || !this.gameplayActive) return;
       this.spawnCurrentWaveFormation();
-      this.armWaveTimers(this.time.now);
       this.physics.resume();
       this.resetPlayerShipToSpawnAndReanchorPointer();
       this.refreshWaveBanner();
+      this.beginWaveSpawnIntro();
     };
 
     if (beatBoss) {
-      this.playSectorEndAfterBossThen(finishWaveBreak);
+      this.playSectorEndAfterBossThen(() => this.playRoundAnnouncementThen(finishWaveBreak));
     } else if (this.waveNumber === BOSS_WAVE_NUMBER) {
       this.playBossApproachAlertThen(finishWaveBreak);
     } else {
@@ -1111,7 +1286,7 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
-  /** După învins bossul: sectorend 7 s (fără card „Runda”), apoi val 1 noul sector. */
+  /** După învins bossul: sectorend 7 s, apoi quiz (dacă există), apoi `done` (ex.: card Sector/Val + spawn). */
   private playSectorEndAfterBossThen(done: () => void): void {
     this.roundAnnouncementLayer?.destroy(true);
     this.roundAnnouncementLayer = undefined;
@@ -1131,8 +1306,165 @@ export class MainScene extends Phaser.Scene {
         this.sectorEndAfterBossSound.destroy();
         this.sectorEndAfterBossSound = undefined;
       }
-      done();
+      this.showPostBossQuizThen(done);
     });
+  }
+
+  private showPostBossQuizThen(done: () => void): void {
+    this.quizLayer?.destroy(true);
+    this.quizLayer = undefined;
+
+    if (this.quizQuestions.length === 0) {
+      done();
+      return;
+    }
+
+    const q = Phaser.Utils.Array.GetRandom(this.quizQuestions) as BossQuizQuestion;
+    const w = this.scale.width;
+    const h = this.scale.height;
+
+    const layer = this.add.container(0, 0);
+    this.quizLayer = layer;
+    layer.setDepth(210);
+    layer.setAlpha(1);
+
+    const dim = this.add.rectangle(w / 2, h / 2, w, h, 0x080818, 0.94);
+    dim.setInteractive({ useHandCursor: false });
+
+    const title = this.add
+      .text(w / 2, h * 0.1, 'Quiz — răspunde corect ca să continui', {
+        fontFamily: 'system-ui, Segoe UI, sans-serif',
+        fontSize: '20px',
+        color: '#8ae8ff',
+      })
+      .setOrigin(0.5);
+
+    const qText = this.add
+      .text(w / 2, h * 0.2, q.question, {
+        fontFamily: 'system-ui, Segoe UI, sans-serif',
+        fontSize: '17px',
+        color: '#dceefc',
+        align: 'center',
+        wordWrap: { width: Math.max(280, w - 56) },
+      })
+      .setOrigin(0.5, 0);
+
+    const feedback = this.add
+      .text(w / 2, h * 0.92, '', {
+        fontFamily: 'system-ui, Segoe UI, sans-serif',
+        fontSize: '15px',
+        color: '#ff7675',
+        align: 'center',
+        wordWrap: { width: w - 48 },
+      })
+      .setOrigin(0.5);
+
+    const btnW = Math.min(460, w - 40);
+    const btnH = 44;
+    const gap = 11;
+    const startY = h * 0.42;
+
+    type QuizRow = {
+      btn: Phaser.GameObjects.Rectangle;
+      label: Phaser.GameObjects.Text;
+    };
+    const rows: QuizRow[] = [];
+
+    const runQuizTransition = (afterFade: () => void): void => {
+      this.time.delayedCall(QUIZ_RESULT_HOLD_MS, () => {
+        if (!this.sys.isActive()) return;
+        if (this.quizLayer !== layer) return;
+        this.tweens.add({
+          targets: layer,
+          alpha: 0,
+          duration: QUIZ_TRANSITION_FADE_MS,
+          ease: 'Cubic.easeIn',
+          onComplete: () => {
+            if (this.quizLayer === layer) {
+              this.quizLayer.destroy(true);
+              this.quizLayer = undefined;
+            } else {
+              layer.destroy(true);
+            }
+            afterFade();
+          },
+        });
+      });
+    };
+
+    const lockAll = (): void => {
+      for (const { btn, label } of rows) {
+        btn.disableInteractive();
+        label.disableInteractive();
+      }
+    };
+
+    layer.add(dim);
+    layer.add(title);
+    layer.add(qText);
+    layer.add(feedback);
+
+    let answered = false;
+    const baseFill = 0x1e4a6e;
+
+    for (let i = 0; i < 4; i++) {
+      const cy = startY + i * (btnH + gap);
+      const btn = this.add
+        .rectangle(w / 2, cy, btnW, btnH, baseFill, 1)
+        .setStrokeStyle(2, 0x6ecfff)
+        .setInteractive({ useHandCursor: true });
+      const label = this.add
+        .text(w / 2, cy, q.answers[i], {
+          fontFamily: 'system-ui, Segoe UI, sans-serif',
+          fontSize: '14px',
+          color: '#f4fcff',
+          align: 'center',
+          wordWrap: { width: btnW - 28 },
+        })
+        .setOrigin(0.5);
+      rows.push({ btn, label });
+
+      const onHover = () => {
+        if (answered) return;
+        this.playButtonHoverSound();
+        btn.setFillStyle(0x2a5f8f);
+      };
+      const onOut = () => {
+        if (answered) return;
+        btn.setFillStyle(baseFill);
+      };
+      btn.on('pointerover', onHover);
+      btn.on('pointerout', onOut);
+      label.setInteractive({ useHandCursor: true });
+      label.on('pointerover', onHover);
+      label.on('pointerout', onOut);
+
+      const onPick = (idx: number) => {
+        if (answered) return;
+        answered = true;
+        lockAll();
+
+        const row = rows[idx];
+        if (idx === q.correctIndex) {
+          row.btn.setFillStyle(0x1b5e32, 1);
+          row.btn.setStrokeStyle(3, 0x4ade80, 1);
+          feedback.setText('Corect!');
+          feedback.setStyle({ color: '#4ade80' });
+          runQuizTransition(() => done());
+        } else {
+          row.btn.setFillStyle(0x6b1c1c, 1);
+          row.btn.setStrokeStyle(3, 0xff5252, 1);
+          feedback.setText('Răspuns greșit.');
+          feedback.setStyle({ color: '#ff7675' });
+          runQuizTransition(() => this.gameOver('Răspuns greșit la quiz'));
+        }
+      };
+      btn.on('pointerdown', () => onPick(i));
+      label.on('pointerdown', () => onPick(i));
+
+      layer.add(btn);
+      layer.add(label);
+    }
   }
 
   /** 6 s: roalert în buclă + mesaj; apoi spawn boss (fără cardul „Runda …”). */
@@ -1152,8 +1484,22 @@ export class MainScene extends Phaser.Scene {
 
     const dim = this.add.rectangle(w / 2, h / 2, w, h, 0x1a0512, 0.85);
     dim.setInteractive({ useHandCursor: false });
+    const sectorLine = this.add
+      .text(w / 2, h * 0.34, `Sector ${this.stageNumber}`, {
+        fontFamily: 'system-ui, Segoe UI, sans-serif',
+        fontSize: '22px',
+        color: '#9ddcff',
+      })
+      .setOrigin(0.5);
+    const valLine = this.add
+      .text(w / 2, h * 0.39, `Val ${this.waveNumber} · BOSS`, {
+        fontFamily: 'system-ui, Segoe UI, sans-serif',
+        fontSize: '18px',
+        color: 'rgba(180, 220, 255, 0.9)',
+      })
+      .setOrigin(0.5);
     const msg = this.add
-      .text(w / 2, h * 0.48, 'Se apropie dujmanu', {
+      .text(w / 2, h * 0.52, 'Se apropie dujmanu', {
         fontFamily: 'system-ui, Segoe UI, sans-serif',
         fontSize: '36px',
         color: '#ff8a8a',
@@ -1161,7 +1507,7 @@ export class MainScene extends Phaser.Scene {
         strokeThickness: 7,
       })
       .setOrigin(0.5);
-    layer.add([dim, msg]);
+    layer.add([dim, sectorLine, valLine, msg]);
 
     if (this.cache.audio.exists(SFX.BOSS_ALERT)) {
       this.bossApproachSound = this.sound.add(SFX.BOSS_ALERT, { volume: 0.92 });
@@ -1185,11 +1531,14 @@ export class MainScene extends Phaser.Scene {
 
   private getRoundAnnouncementCopy(): { main: string; sub: string } {
     if (this.waveNumber === BOSS_WAVE_NUMBER) {
-      return { main: 'BOSS', sub: `Sector ${this.stageNumber}` };
+      return {
+        main: `Sector ${this.stageNumber}`,
+        sub: `Val ${this.waveNumber} · BOSS`,
+      };
     }
     return {
-      main: `Runda ${this.waveNumber}`,
-      sub: `Sector ${this.stageNumber}  ·  Val ${this.waveNumber} din ${NORMAL_WAVE_COUNT}`,
+      main: `Sector ${this.stageNumber}`,
+      sub: `Val ${this.waveNumber} / ${NORMAL_WAVE_COUNT}`,
     };
   }
 
@@ -1293,19 +1642,146 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
+  private onWaveIntroComplete(): void {
+    this.waveIntroActive = false;
+    for (const c of this.enemies.getChildren()) {
+      const e = c as Phaser.Physics.Arcade.Image;
+      if (!e.active) continue;
+      const b = e.body as Phaser.Physics.Arcade.Body;
+      b.setVelocity(0, 0);
+    }
+    if (!this.gameplayActive || this.matchEnded || this.waveBreakInProgress) return;
+    this.armWaveTimers(this.time.now);
+    const boss = this.findActiveBoss();
+    if (boss) {
+      const maxHp = boss.getData('bossMaxHp') as number;
+      const hp = boss.getData('hp') as number;
+      if (typeof maxHp === 'number' && maxHp > 0) {
+        this.showBossHealthBar(maxHp, typeof hp === 'number' ? hp : maxHp);
+      }
+    }
+  }
+
+  private beginWaveSpawnIntro(): void {
+    const boss = this.findActiveBoss();
+    if (boss) {
+      this.beginBossSpawnIntro(boss);
+    } else {
+      this.beginFleetSpawnIntro();
+    }
+  }
+
+  private beginFleetSpawnIntro(): void {
+    const list = this.enemies
+      .getChildren()
+      .filter((o) => (o as Phaser.Physics.Arcade.Image).active) as Phaser.Physics.Arcade.Image[];
+    if (list.length === 0) {
+      this.onWaveIntroComplete();
+      return;
+    }
+    list.sort(
+      (a, b) => (a.getData('introOrder') as number) - (b.getData('introOrder') as number),
+    );
+    this.waveIntroActive = true;
+    let pending = list.length;
+    const doneOne = () => {
+      pending--;
+      if (pending === 0) this.onWaveIntroComplete();
+    };
+    for (const e of list) {
+      const tx = e.getData('introTx') as number;
+      const ty = e.getData('introTy') as number;
+      const sx = e.getData('introSx') as number;
+      const sy = e.getData('introSy') as number;
+      const ord = (e.getData('introOrder') as number) ?? 0;
+      if (typeof tx !== 'number' || typeof ty !== 'number') {
+        doneOne();
+        continue;
+      }
+      this.tweens.add({
+        targets: e,
+        x: tx,
+        y: ty,
+        alpha: 1,
+        scaleX: sx,
+        scaleY: sy,
+        duration: WAVE_INTRO_TWEEN_MS,
+        delay: ord * WAVE_INTRO_STAGGER_MS,
+        ease: 'Cubic.easeOut',
+        onUpdate: () => {
+          if (!e.active) return;
+          (e.body as Phaser.Physics.Arcade.Body).reset(e.x, e.y);
+        },
+        onComplete: () => {
+          if (e.active) (e.body as Phaser.Physics.Arcade.Body).reset(tx, ty);
+          doneOne();
+        },
+      });
+    }
+  }
+
+  private beginBossSpawnIntro(boss: Phaser.Physics.Arcade.Image): void {
+    const tx = boss.getData('introTx') as number;
+    const ty = boss.getData('introTy') as number;
+    const sx = boss.getData('introSx') as number;
+    const sy = boss.getData('introSy') as number;
+    if (
+      typeof tx !== 'number' ||
+      typeof ty !== 'number' ||
+      typeof sx !== 'number' ||
+      typeof sy !== 'number'
+    ) {
+      boss.setAlpha(1);
+      (boss.body as Phaser.Physics.Arcade.Body).reset(boss.x, boss.y);
+      this.onWaveIntroComplete();
+      return;
+    }
+    this.waveIntroActive = true;
+    let finished = false;
+    const finishOne = () => {
+      if (finished) return;
+      finished = true;
+      if (boss.active) (boss.body as Phaser.Physics.Arcade.Body).reset(tx, ty);
+      this.onWaveIntroComplete();
+    };
+    this.tweens.add({
+      targets: boss,
+      x: tx,
+      y: ty,
+      alpha: 1,
+      scaleX: sx,
+      scaleY: sy,
+      duration: BOSS_INTRO_TWEEN_MS,
+      delay: BOSS_INTRO_STAGGER_MS,
+      ease: 'Cubic.easeOut',
+      onUpdate: () => {
+        if (!boss.active) return;
+        (boss.body as Phaser.Physics.Arcade.Body).reset(boss.x, boss.y);
+      },
+      onComplete: finishOne,
+    });
+  }
+
   private spawnBoss(): void {
     const w = this.scale.width;
-    const firstBoss = this.stageNumber === 1;
-    const useNicusor = firstBoss && this.textures.exists(TEX.NICUSOR);
-    const tex = useNicusor ? TEX.NICUSOR : TEX.CHICKEN;
+    const s = this.stageNumber;
 
-    const e = this.physics.add.image(w / 2, 130, tex);
+    let tex: string = TEX.CHICKEN;
+    if (s === 1 && this.textures.exists(TEX.NICUSOR)) tex = TEX.NICUSOR;
+    else if (s === 2 && this.textures.exists(TEX.BOLO)) tex = TEX.BOLO;
+    else if (s === 3 && this.textures.exists(TEX.SOROS)) tex = TEX.SOROS;
+
+    const useBossPng =
+      tex === TEX.NICUSOR || tex === TEX.BOLO || tex === TEX.SOROS;
+
+    const ty = 130;
+    const e = this.physics.add.image(w / 2, ty, tex);
     e.clearTint();
 
-    if (useNicusor) {
+    if (useBossPng) {
       this.applyTextureFitBox(e, NICUSOR_BOSS_MAX_DISPLAY_W, NICUSOR_BOSS_MAX_DISPLAY_H, true);
     } else {
-      e.setScale(2.55 + Math.min(0.95, this.stageNumber * 0.11));
+      e.setScale(2.55 + Math.min(0.95, s * 0.11));
       e.refreshBody();
     }
 
@@ -1314,18 +1790,31 @@ export class MainScene extends Phaser.Scene {
     e.setData('bossMaxHp', hp);
     e.setData('isBoss', true);
 
+    const fsx = e.scaleX;
+    const fsy = e.scaleY;
+    e.setData('introTx', w / 2);
+    e.setData('introTy', ty);
+    e.setData('introSx', fsx);
+    e.setData('introSy', fsy);
+    e.setPosition(w / 2, ty - WAVE_INTRO_DROP_Y * 1.1);
+    e.setAlpha(0);
+    e.setScale(fsx * 0.18, fsy * 0.18);
+
     const b = e.body as Phaser.Physics.Arcade.Body;
     b.setImmovable(true);
     b.setAllowGravity(false);
+    b.reset(e.x, e.y);
+    e.refreshBody();
 
     this.enemies.add(e);
-    if (this.gameplayActive) {
-      this.showBossHealthBar(hp, hp);
-    }
   }
 
-  private gameOver(): void {
+  private gameOver(titleMessage = 'Ai rămas fără vieți'): void {
     if (this.matchEnded) return;
+    this.gameplayActive = false;
+    this.waveBreakInProgress = false;
+    this.waveIntroActive = false;
+    this.playerDeathAnimActive = false;
     if (this.cache.audio.exists(SFX.DEAD)) {
       this.sound.play(SFX.DEAD, { volume: 0.9 });
     }
@@ -1335,13 +1824,13 @@ export class MainScene extends Phaser.Scene {
     this.player.setAlpha(1);
     this.escMenuOpen = false;
     this.pauseMenuLayer.setVisible(false);
-    this.hintText.setText('');
     this.physics.pause();
-    this.hud.setText('');
+    this.hudSubtitle = '';
+    this.applyHudText();
     this.hud.setStyle({ color: '#8ae8ff' });
 
     const title = this.gameOverLayer.getData('titleText') as Phaser.GameObjects.Text;
-    title.setText('Ai rămas fără vieți');
+    title.setText(titleMessage);
     title.setStyle({ color: '#ff7675' });
     this.gameOverLayer.setVisible(true);
   }
@@ -1357,19 +1846,52 @@ export class MainScene extends Phaser.Scene {
     body.setVelocity(0, -520);
     body.setCollideWorldBounds(true);
     body.onWorldBounds = true;
+    if (this.cache.audio.exists(SFX.MAIN_GUN)) {
+      const t = this.time.now;
+      if (t - this.lastMainGunSoundTime >= MAIN_GUN_MIN_INTERVAL_MS) {
+        this.lastMainGunSoundTime = t;
+        this.sound.play(SFX.MAIN_GUN, {
+          volume: 0.58,
+          detune: Phaser.Math.Between(-70, 70),
+        });
+      }
+    }
     return true;
+  }
+
+  private playerSalvoRowSizes(total: number): number[] {
+    const rows: number[] = [];
+    let remaining = total;
+    for (let r = 0; r < PLAYER_SALVO_ROW_CAPS.length && remaining > 0; r++) {
+      const cap = PLAYER_SALVO_ROW_CAPS[r];
+      const take = Math.min(remaining, cap);
+      rows.push(take);
+      remaining -= take;
+    }
+    const lastCap = PLAYER_SALVO_ROW_CAPS[PLAYER_SALVO_ROW_CAPS.length - 1];
+    while (remaining > 0) {
+      const take = Math.min(remaining, lastCap);
+      rows.push(take);
+      remaining -= take;
+    }
+    return rows;
   }
 
   private fireBullet(time: number): void {
     if (time < this.nextFire) return;
 
-    const y = this.player.y - 28;
     const n = this.bulletCount;
-    const spacing = n <= 1 ? 0 : 15;
+    const baseY = this.player.y - PLAYER_SALVO_ORIGIN_Y_OFFSET;
+    const spacing = PLAYER_SALVO_SPACING_X;
+    const rowSizes = this.playerSalvoRowSizes(n);
     let any = false;
-    for (let i = 0; i < n; i++) {
-      const off = n === 1 ? 0 : (i - (n - 1) / 2) * spacing;
-      if (this.spawnOneBullet(this.player.x + off, y)) any = true;
+    for (let row = 0; row < rowSizes.length; row++) {
+      const k = rowSizes[row];
+      const y = baseY - row * PLAYER_SALVO_ROW_GAP_Y;
+      for (let i = 0; i < k; i++) {
+        const off = k <= 1 ? 0 : (i - (k - 1) / 2) * spacing;
+        if (this.spawnOneBullet(this.player.x + off, y)) any = true;
+      }
     }
     if (!any) return;
 
@@ -1377,7 +1899,7 @@ export class MainScene extends Phaser.Scene {
   }
 
   private tryEnemyShot(time: number): void {
-    if (this.matchEnded || !this.gameplayActive || this.escMenuOpen) return;
+    if (this.matchEnded || !this.gameplayActive || this.escMenuOpen || this.waveIntroActive) return;
     if (time < this.nextEnemyShotAt) return;
 
     const active = this.enemies
@@ -1480,7 +2002,8 @@ export class MainScene extends Phaser.Scene {
   }
 
   private updateJeansBombs(): void {
-    if (this.matchEnded || !this.gameplayActive || this.escMenuOpen || this.waveBreakInProgress) return;
+    if (this.matchEnded || !this.gameplayActive || this.escMenuOpen || this.waveBreakInProgress || this.waveIntroActive)
+      return;
     const w = this.scale.width;
     const h = this.scale.height;
     const triggerY = h - JEANS_EXPLODE_BOTTOM_MARGIN;
@@ -1543,7 +2066,7 @@ export class MainScene extends Phaser.Scene {
   }
 
   private updateFleetMovement(): void {
-    if (!this.gameplayActive || this.escMenuOpen || this.matchEnded) return;
+    if (!this.gameplayActive || this.escMenuOpen || this.matchEnded || this.waveIntroActive) return;
     const list = this.enemies.getChildren() as Phaser.Physics.Arcade.Image[];
     const active = list.filter((e) => e.active);
     if (active.length === 0) return;
@@ -1607,8 +2130,9 @@ export class MainScene extends Phaser.Scene {
         this.shipAwaitingAlignClickAfterRound = false;
       }
 
-      const canMoveShip = pointerInCanvas && !postPauseFrozen;
-      const weaponsAllowed = canMoveShip && !this.shipAwaitingAlignClickAfterRound;
+      const canMoveShip = pointerInCanvas && !postPauseFrozen && !this.playerDeathAnimActive;
+      const weaponsAllowed =
+        canMoveShip && !this.shipAwaitingAlignClickAfterRound && !this.waveIntroActive;
 
       if (canMoveShip) {
         if (this.shipAwaitingAlignClickAfterRound) {
@@ -1645,6 +2169,5 @@ export class MainScene extends Phaser.Scene {
     this.updateFleetMovement();
     this.updateJeansBombs();
     this.tryEnemyShot(time);
-    this.trySpawnGift(time);
   }
 }

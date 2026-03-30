@@ -3,12 +3,20 @@ import Phaser from 'phaser';
 export const TEX = {
   SHIP: 'tex_ship',
   CHICKEN: 'tex_chicken',
+  /** Flotă standard 2 HP (`images/enemy1.png`). */
+  ENEMY1: 'tex_enemy1',
+  /** Inamic „tare” 3 HP / blugi (`images/enemy2.png`). */
+  ENEMY2: 'tex_enemy2',
   BULLET: 'tex_bullet',
   ENEMY_BULLET: 'tex_enemy_bullet',
   /** Doar proiectil (inamicii tari trag blugi; sprite-ul lor rămâne puiul). */
   BLUGI: 'tex_blugi',
   /** Primul boss (sector 1). */
   NICUSOR: 'tex_nicusor',
+  /** Al doilea boss (sector 2). */
+  BOLO: 'tex_bolo',
+  /** Al treilea boss (sector 3). */
+  SOROS: 'tex_soros',
 } as const;
 
 export const SFX = {
@@ -16,6 +24,9 @@ export const SFX = {
   HIT: 'sfx_hit',
   BOSS_ALERT: 'sfx_roalert',
   SECTOR_END: 'sfx_sectorend',
+  BTN_HOVER: 'sfx_btn_hover',
+  /** Glonț nava jucătorului. */
+  MAIN_GUN: 'sfx_maingun',
 } as const;
 
 export type GiftKind = 'food' | 'water' | 'energy';
@@ -27,7 +38,7 @@ export const GIFT_LABELS: Record<GiftKind, string> = {
 };
 
 /**
- * Nava: `images/ship.png`. Banană / blugi / primul boss: `banana`, `blugi`, `nicusor`.
+ * Nava: `images/ship.png`. Flotă: `enemy1`, `enemy2`. Bossuri: `nicusor`, `bolo`, `soros`. Banană / blugi: `banana`, `blugi`.
  */
 export class PreloadScene extends Phaser.Scene {
   constructor() {
@@ -36,13 +47,20 @@ export class PreloadScene extends Phaser.Scene {
 
   preload(): void {
     this.load.image(TEX.SHIP, 'images/ship.png');
+    this.load.image(TEX.ENEMY1, 'images/enemy1.png');
+    this.load.image(TEX.ENEMY2, 'images/enemy2.png');
     this.load.image(TEX.ENEMY_BULLET, 'images/banana.png');
     this.load.image(TEX.BLUGI, 'images/blugi.png');
     this.load.image(TEX.NICUSOR, 'images/nicusor.png');
+    this.load.image(TEX.BOLO, 'images/bolo.png');
+    this.load.image(TEX.SOROS, 'images/soros.png');
     this.load.audio(SFX.DEAD, 'audio/dead.mp3');
     this.load.audio(SFX.HIT, 'audio/hit.mp3');
     this.load.audio(SFX.BOSS_ALERT, 'audio/roalert.mp3');
     this.load.audio(SFX.SECTOR_END, 'audio/sectorend.mp3');
+    this.load.audio(SFX.BTN_HOVER, 'audio/btn-hover.mp3');
+    this.load.audio(SFX.MAIN_GUN, 'audio/maingun.mp3');
+    this.load.json('boss_quiz', 'data/boss-quiz.json');
   }
 
   create(): void {

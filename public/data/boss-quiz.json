@@ -1,0 +1,16 @@
+{
+  "questions": [
+    {
+      "id": "exemple-1",
+      "question": "România este:",
+      "answers": ["Templul renașterii spirituale a umanității", "Slaba", "Tara mea baaaa", "Mare"],
+      "correctIndex": 0
+    },
+    {
+      "id": "exemple-2",
+      "question": "România este:",
+      "answers": ["Miezul din gogoașă", "Inima spirituală a Europei", "Tot", "Moldova"],
+      "correctIndex": 1
+    }
+  ]
+}
